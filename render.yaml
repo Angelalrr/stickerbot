@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: stickerbot-whatsapp
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false
+      - key: BOT_NAME
+        value: StickerBot
+      - key: STICKER_PACK
+        value: StickerBot Pack
+      - key: STICKER_AUTHOR
+        value: StickerBot
+      - key: MAX_VIDEO_SECONDS
+        value: "7"
+      - key: MAX_STICKER_KB
+        value: "500"
+      - key: AUDIO_KBPS
+        value: "32"
+      - key: AUDIO_LEAD_MS
+        value: "100"

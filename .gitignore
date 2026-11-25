@@ -1,0 +1,15 @@
+node_modules/
+build/
+dist/
+coverage/
+temp/
+data/
+auth_*/
+whatsapp_session*/
+.playwright-cli/
+.DS_Store
+*.log
+*.zip
+.env
+.env.*
+!.env.example

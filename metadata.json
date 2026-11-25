@@ -1,0 +1,6 @@
+{
+  "name": "StickerBot",
+  "description": "Centro de descarga, guia paso a paso para Windows y probador de comandos para StickerBot en WhatsApp.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
