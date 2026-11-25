@@ -10,6 +10,7 @@ import {
   isAllowedGroup,
   parseCommand,
   parseVideoCropMode,
+  resolveTrimWindow,
   sanitizePhoneForPairing,
   validateGroupJid,
   validatePin,
@@ -25,7 +26,6 @@ import {
   getEmbeddedAudioSize,
   installStickerAudioPatch,
 } from './stickerAudioPatch.ts';
-import { buildRenderZipBuffer, collectExportFiles, shouldExcludeEntry } from '../routes/exportRender.ts';
 import { checkFfmpegAvailable } from '../config.ts';
 import { parseWebpInfo, runProcess, videoToAnimatedStickerWebp } from './mediaProcessors.ts';
 
@@ -174,26 +174,27 @@ test('installStickerAudioPatch embeds AudioMessage into field 26 for matching fi
   assert.equal(getEmbeddedAudioSize(encodedNormal), null);
 });
 
-test('exportRender includes Render files, excludes secrets/sessions, and generates valid PKZIP buffer', async () => {
-  assert.equal(shouldExcludeEntry('node_modules', true), true);
-  assert.equal(shouldExcludeEntry('.git', true), true);
-  assert.equal(shouldExcludeEntry('auth_info', true), true);
-  assert.equal(shouldExcludeEntry('.env', false), true);
-  assert.equal(shouldExcludeEntry('.env.example', false), false);
+test('resolveTrimWindow clamps the web video trim to the WhatsApp animated sticker limit', () => {
+  const ok = resolveTrimWindow('1.5', '5', 20, 10);
+  assert.equal(ok.valid, true);
+  assert.equal(ok.start, 1.5);
+  assert.equal(ok.duration, 5);
 
-  const files = await collectExportFiles();
-  assert.ok(files.includes('Dockerfile'));
-  assert.ok(files.includes('render.yaml'));
-  assert.ok(files.includes('package.json'));
-  assert.ok(files.includes('server.ts'));
-  assert.ok(files.includes('README.md'));
-  assert.ok(!files.some((f) => f.startsWith('node_modules/')));
-  assert.ok(!files.some((f) => f.startsWith('StickerBot/')));
+  const short = resolveTrimWindow(0, 0.2, null, 10);
+  assert.equal(short.valid, false);
 
-  const zipBuf = await buildRenderZipBuffer();
-  assert.equal(zipBuf[0], 0x50);
-  assert.equal(zipBuf[1], 0x4b);
-  assert.ok(zipBuf.length > 5000);
+  const overLimit = resolveTrimWindow(0, 15, null, 10);
+  assert.equal(overLimit.valid, false);
+  assert.ok(overLimit.error?.includes('máximo 10'));
+
+  const negativeStart = resolveTrimWindow(-1, 3, null, 10);
+  assert.equal(negativeStart.valid, false);
+
+  const beyondVideoEnd = resolveTrimWindow(18, 5, 20, 10);
+  assert.equal(beyondVideoEnd.valid, false);
+
+  const atVideoEnd = resolveTrimWindow(16, 4, 20, 10);
+  assert.equal(atVideoEnd.valid, true);
 });
 
 test('videoToAnimatedStickerWebp crops 16:9 video to 512x512 square and cleans temp files', async (t) => {

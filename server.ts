@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
+import multer from 'multer';
 import { config, getSystemCapabilities, ROOT_DIR } from './server/config.ts';
 import {
   issueSessionToken,
@@ -20,12 +21,21 @@ import {
   validatePin,
   validateUserId,
 } from './server/bot/validation.ts';
-import { handleExportRender } from './server/routes/exportRender.ts';
+import { handleStickerCreate } from './server/routes/stickerCreate.ts';
 
 async function bootstrap(): Promise<void> {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '256kb' }));
+
+  // Subidas del creador web en memoria (Sharp/FFmpeg trabajan sobre Buffer)
+  const stickerUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      fileSize: Math.max(config.maxImageBytes, config.maxVideoBytes) + 1024,
+      files: 1,
+    },
+  });
 
   const store = new HybridUserStore();
   await store.init();
@@ -46,6 +56,12 @@ async function bootstrap(): Promise<void> {
       const capabilities = await getSystemCapabilities(store.mode);
       res.status(200).json({
         ...capabilities,
+        limits: {
+          maxImageMb: Math.round(config.maxImageBytes / (1024 * 1024)),
+          maxVideoMb: Math.round(config.maxVideoBytes / (1024 * 1024)),
+          maxVideoSeconds: config.maxVideoSeconds,
+          maxStickerKb: Math.round(config.maxStickerBytes / 1024),
+        },
         queue: videoProcessingQueue.stats(),
       });
     } catch {
@@ -54,14 +70,40 @@ async function bootstrap(): Promise<void> {
         ffprobeAvailable: false,
         mongodbConfigured: Boolean(config.mongodbUri),
         dbMode: store.mode,
+        limits: {
+          maxImageMb: Math.round(config.maxImageBytes / (1024 * 1024)),
+          maxVideoMb: Math.round(config.maxVideoBytes / (1024 * 1024)),
+          maxVideoSeconds: config.maxVideoSeconds,
+          maxStickerKb: Math.round(config.maxStickerBytes / 1024),
+        },
         queue: videoProcessingQueue.stats(),
       });
     }
   });
 
-  app.get('/api/export-render', (req, res) => {
-    void handleExportRender(req, res);
+  // Grupos a los que pertenece la cuenta vinculada (para el selector del creador web)
+  app.get('/api/session/groups', requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const groups = await sessionManager.listUserGroups(req.authUserId!);
+      res.status(200).json({ groups });
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'No se pudieron listar los grupos de tu WhatsApp.';
+      res.status(400).json({ error: message });
+    }
   });
+
+  // Creador de stickers web: foto/video/texto procesado en el servidor y enviado al grupo
+  app.post(
+    '/api/sticker/create',
+    requireAuth,
+    stickerUpload.single('file'),
+    (req: AuthenticatedRequest, res) => {
+      void handleStickerCreate(req, res, store, sessionManager);
+    }
+  );
 
   app.post('/api/auth/register', async (req, res) => {
     try {
@@ -213,6 +255,33 @@ async function bootstrap(): Promise<void> {
       res.status(400).json({ error: message });
     }
   });
+
+  // Manejador de errores para multer y middlewares de subida
+  app.use(
+    (
+      err: unknown,
+      _req: express.Request,
+      res: express.Response,
+      _next: express.NextFunction
+    ) => {
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code: unknown }).code)
+          : '';
+      if (code === 'LIMIT_FILE_SIZE') {
+        const maxMb = (
+          Math.max(config.maxImageBytes, config.maxVideoBytes) /
+          (1024 * 1024)
+        ).toFixed(0);
+        res
+          .status(413)
+          .json({ error: `El archivo supera el límite de ${maxMb} MB para stickers.` });
+        return;
+      }
+      console.error('[StickerBot] Error de middleware:', err);
+      res.status(500).json({ error: 'Error interno al procesar la solicitud.' });
+    }
+  );
 
   const distDir = path.join(ROOT_DIR, 'dist');
   const distIndex = path.join(distDir, 'index.html');

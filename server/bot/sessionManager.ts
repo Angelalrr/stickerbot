@@ -230,6 +230,71 @@ export class MultiUserSessionManager {
     };
   }
 
+  async listUserGroups(userId: string): Promise<
+    Array<{ jid: string; subject: string; participants: number }>
+  > {
+    const rt = this.getOrCreateRuntime(userId);
+    if (rt.status !== 'connected' || !rt.sock) {
+      throw new Error('Tu WhatsApp no está conectado. Vincula tu cuenta en el Panel primero.');
+    }
+    const groups = await rt.sock.groupFetchAllParticipating();
+    return Object.values(groups)
+      .map((group) => ({
+        jid: group.id,
+        subject: group.subject || 'Grupo de WhatsApp',
+        participants: Array.isArray(group.participants) ? group.participants.length : 0,
+      }))
+      .sort((a, b) => a.subject.localeCompare(b.subject));
+  }
+
+  private async getSendTarget(
+    userId: string,
+    requestedGroupJid?: string
+  ): Promise<{ rt: UserRuntime; sock: WASocket; groupJid: string }> {
+    const rt = this.getOrCreateRuntime(userId);
+    if (rt.status !== 'connected' || !rt.sock) {
+      throw new Error('Tu WhatsApp no está conectado. Vincula tu cuenta en el Panel primero.');
+    }
+    const userRecord = await this.store.getUser(userId);
+    const groupJid = requestedGroupJid || userRecord?.authorizedGroupJid || '';
+    if (!groupJid) {
+      throw new Error('No hay grupo de destino. Selecciona un grupo en el Creador de stickers.');
+    }
+    if (!groupJid.endsWith('@g.us')) {
+      throw new Error('El grupo de destino no es válido. Selecciona un grupo de WhatsApp.');
+    }
+    return { rt, sock: rt.sock, groupJid };
+  }
+
+  /**
+   * Envia un sticker WebP ya procesado al grupo autorizado del usuario (creador web).
+   */
+  async sendStickerToGroup(userId: string, webpBuffer: Buffer, groupJid?: string): Promise<{ groupJid: string }> {
+    const { rt, sock, groupJid: targetGroupJid } = await this.getSendTarget(userId, groupJid);
+    await this.sendTracked(rt, sock, targetGroupJid, { sticker: webpBuffer });
+    return { groupJid: targetGroupJid };
+  }
+
+  /**
+   * Envia un Sound Sticker nativo (WebP + OGG en campo 26) al grupo autorizado del usuario.
+   */
+  async sendSoundStickerToGroup(
+    userId: string,
+    params: { webpBuffer: Buffer; oggBuffer: Buffer; waveform: Uint8Array; seconds: number; groupJid?: string }
+  ): Promise<{ groupJid: string }> {
+    const { rt, sock, groupJid } = await this.getSendTarget(userId, params.groupJid);
+    await sendNativeSoundSticker({
+      sock: sock as never,
+      remoteJid: groupJid,
+      webpBuffer: params.webpBuffer,
+      oggBuffer: params.oggBuffer,
+      waveform: params.waveform,
+      seconds: params.seconds,
+      sentMessageIds: rt.sentMessageIds,
+    });
+    return { groupJid };
+  }
+
   async disconnectSession(userId: string, clearAuth = false): Promise<PublicSessionSnapshot> {
     const rt = this.getOrCreateRuntime(userId);
     rt.manualClose = true;

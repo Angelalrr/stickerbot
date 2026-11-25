@@ -465,6 +465,8 @@ export async function videoToAnimatedStickerWebp(
     packName?: string;
     authorName?: string;
     cropMode?: VideoCropMode;
+    trimStart?: number;
+    trimDuration?: number;
     signal?: AbortSignal;
   } = {}
 ): Promise<{
@@ -478,11 +480,13 @@ export async function videoToAnimatedStickerWebp(
 }> {
   const {
     extension = 'mp4',
-    maxSeconds = 7,
+    maxSeconds = 10,
     maxBytes = 500 * 1024,
     packName = 'StickerBot Pack',
     authorName = 'StickerBot',
     cropMode = 'crop',
+    trimStart = 0,
+    trimDuration,
     signal,
   } = options;
 
@@ -497,11 +501,18 @@ export async function videoToAnimatedStickerWebp(
     const inputPath = createTempJobPath('vidin', extension);
     const outputPath = createTempJobPath('vidout', 'webp');
 
+    // Ventana temporal pedida desde el creador web (o el video completo por defecto)
+    const baseDuration = Math.max(
+      0.5,
+      Math.min(trimDuration && trimDuration > 0 ? trimDuration : maxSeconds, maxSeconds)
+    );
+    const seekSeconds = trimStart > 0.01 ? trimStart.toFixed(3) : null;
+
     const presets = [
-      { fps: 15, quality: 55, duration: maxSeconds, size: 512 },
-      { fps: 12, quality: 40, duration: Math.min(maxSeconds, 6), size: 512 },
-      { fps: 10, quality: 28, duration: Math.min(maxSeconds, 5), size: 512 },
-      { fps: 8, quality: 20, duration: Math.min(maxSeconds, 4), size: 384 },
+      { fps: 15, quality: 55, duration: baseDuration, size: 512 },
+      { fps: 12, quality: 40, duration: Math.min(baseDuration, 6), size: 512 },
+      { fps: 10, quality: 28, duration: Math.min(baseDuration, 5), size: 512 },
+      { fps: 8, quality: 20, duration: Math.min(baseDuration, 4), size: 384 },
     ];
 
     try {
@@ -518,6 +529,7 @@ export async function videoToAnimatedStickerWebp(
           'ffmpeg',
           [
             '-y',
+            ...(seekSeconds ? ['-ss', seekSeconds] : []),
             '-i',
             inputPath,
             '-t',
@@ -600,6 +612,7 @@ export async function extractSynchronizedAudio(options: {
   targetDuration: number;
   kbps?: number;
   leadMs?: number;
+  startOffsetMs?: number;
   signal?: AbortSignal;
 }): Promise<{ buffer: Buffer; waveform: Uint8Array; mimetype: string; sizeBytes: number } | null> {
   const {
@@ -608,6 +621,7 @@ export async function extractSynchronizedAudio(options: {
     targetDuration,
     kbps = 32,
     leadMs = 100,
+    startOffsetMs = 0,
     signal,
   } = options;
 
@@ -624,7 +638,9 @@ export async function extractSynchronizedAudio(options: {
 
     try {
       await fs.writeFile(inputPath, inputBuffer);
-      const leadArgs = leadMs > 0 ? ['-ss', (leadMs / 1000).toFixed(3)] : [];
+      // Arranca donde empieza el recorte del creador web (+lead para no cortar la primera silaba)
+      const seekMs = Math.max(0, startOffsetMs) + Math.max(0, leadMs);
+      const leadArgs = seekMs > 0 ? ['-ss', (seekMs / 1000).toFixed(3)] : [];
 
       await runProcess(
         'ffmpeg',

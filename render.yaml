@@ -18,7 +18,7 @@ services:
       - key: STICKER_AUTHOR
         value: StickerBot
       - key: MAX_VIDEO_SECONDS
-        value: "7"
+        value: "10"
       - key: MAX_STICKER_KB
         value: "500"
       - key: AUDIO_KBPS

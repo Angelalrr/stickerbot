@@ -32,7 +32,8 @@ export const config = Object.freeze({
 
   maxImageBytes: parsePositiveNumber(process.env.MAX_IMAGE_MB, 10) * 1024 * 1024,
   maxVideoBytes: parsePositiveNumber(process.env.MAX_VIDEO_MB, 20) * 1024 * 1024,
-  maxVideoSeconds: parsePositiveNumber(process.env.MAX_VIDEO_SECONDS, 7),
+  // WhatsApp permite stickers animados de hasta 10 segundos
+  maxVideoSeconds: parsePositiveNumber(process.env.MAX_VIDEO_SECONDS, 10),
   maxStickerBytes: parsePositiveNumber(process.env.MAX_STICKER_KB, 500) * 1024,
   audioKbps: parsePositiveNumber(process.env.AUDIO_KBPS, 32),
   audioLeadMs: Number.isFinite(Number(process.env.AUDIO_LEAD_MS))

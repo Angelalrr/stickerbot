@@ -128,6 +128,72 @@ export function parseCommand(text: string, prefix = '/'): ParsedCommand | null {
   return { command, argsText, args, rawPrefix };
 }
 
+export interface TrimWindow {
+  start: number;
+  duration: number;
+}
+
+/**
+ * Resuelve y valida la ventana temporal que el usuario recorto en el creador web.
+ * El limite superior es la duracion maxima de stickers animados de WhatsApp (maxSeconds).
+ */
+export function resolveTrimWindow(
+  rawStart: unknown,
+  rawDuration: unknown,
+  videoDurationSeconds: number | null,
+  maxSeconds: number
+): { valid: boolean; start: number; duration: number; error?: string } {
+  const start = Number(rawStart);
+  const duration = Number(rawDuration);
+
+  if (!Number.isFinite(start) || !Number.isFinite(duration) || start < 0) {
+    return {
+      valid: false,
+      start: 0,
+      duration: 0,
+      error: 'El recorte del video es inválido. Vuelve a seleccionar el fragmento.',
+    };
+  }
+
+  if (duration < 0.5) {
+    return {
+      valid: false,
+      start,
+      duration,
+      error: 'Selecciona al menos 0.5 segundos de video.',
+    };
+  }
+
+  if (duration > maxSeconds + 0.25) {
+    return {
+      valid: false,
+      start,
+      duration,
+      error: `Los stickers animados de WhatsApp duran máximo ${maxSeconds} segundos. Acorta el recorte.`,
+    };
+  }
+
+  if (
+    videoDurationSeconds !== null &&
+    Number.isFinite(videoDurationSeconds) &&
+    videoDurationSeconds > 0 &&
+    start + duration > videoDurationSeconds + 0.5
+  ) {
+    return {
+      valid: false,
+      start,
+      duration,
+      error: 'El recorte termina después del final del video. Ajusta el fragmento.',
+    };
+  }
+
+  return {
+    valid: true,
+    start: Math.round(start * 1000) / 1000,
+    duration: Math.round(duration * 1000) / 1000,
+  };
+}
+
 /**
  * Detecta si un comando de video (/gif, /stickeranimado, /stickeraudio) pidio mantener
  * la proporcion completa (`completo` o `-full`) o usar el recorte cuadrado centrado por defecto.

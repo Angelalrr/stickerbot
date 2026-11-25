@@ -4,6 +4,8 @@ Bot completo de WhatsApp Web basado en **@whiskeysockets/baileys v7 (ESM)**, **S
 
 Cada persona puede crear su propio usuario con PIN en la página web, vincular su cuenta de WhatsApp mediante **código QR** o **código de emparejamiento de 8 dígitos**, descubrir el ID de su grupo con `//pingdiag` y activar el bot únicamente en ese grupo autorizado.
 
+Además, la pestaña **Creador** del panel web permite crear stickers sin comandos: elige una **foto** (con recorte cuadrado libre), un **video o GIF** (con recorte temporal del fragmento, hasta los 10 segundos que permite WhatsApp para stickers animados y opción de Sound Sticker con audio) o un **texto** con color, y envíalo directamente al grupo seleccionado con el botón **Enviar a WhatsApp**.
+
 ---
 
 ## Comandos disponibles en WhatsApp
@@ -24,24 +26,19 @@ Cada persona puede crear su propio usuario con PIN en la página web, vincular s
 
 ## Guía paso a paso para desplegar gratis en Render
 
-### Paso 1: Descargar y descomprimir el proyecto
-1. Haz clic en **"Descargar para Render"** en la página principal de StickerBot.
-2. Guarda `StickerBot-Render.zip` en tu computadora.
-3. Haz clic derecho sobre `StickerBot-Render.zip` → **Extraer todo...** para obtener la carpeta del proyecto.
-
-### Paso 2: Subir la carpeta a GitHub
+### Paso 1: Subir el proyecto a GitHub
 1. Crea una cuenta gratuita en [github.com](https://github.com) si aún no tienes una.
 2. Crea un repositorio nuevo (puede ser **Private** para mayor orden) sin inicializarlo con README.
-3. Sube todos los archivos extraídos de la carpeta (asegúrate de que `Dockerfile`, `package.json`, `render.yaml` y `server.ts` queden en la raíz del repositorio). Nunca subas archivos `.env` ni carpetas `auth_*`.
+3. Sube todos los archivos de la carpeta del proyecto (asegúrate de que `Dockerfile`, `package.json`, `render.yaml` y `server.ts` queden en la raíz del repositorio). Nunca subas archivos `.env` ni carpetas `auth_*`.
 
-### Paso 3: Crear una base de datos gratuita en MongoDB Atlas
+### Paso 2: Crear una base de datos gratuita en MongoDB Atlas
 Render Free reinicia el disco cada cierto tiempo. Con MongoDB Atlas gratuito (M0, 512 MB), tus usuarios, grupos autorizados y sesiones de WhatsApp **no se pierden**:
 1. Entra a [mongodb.com/atlas](https://www.mongodb.com/atlas) y crea un clúster gratuito (**M0 Free**).
 2. En **Database Access**, crea un usuario y contraseña (sin caracteres especiales raros para no complicar la URL).
 3. En **Network Access**, añade `0.0.0.0/0` (necesario para que Render pueda conectarse).
 4. En **Connect → Drivers**, copia tu cadena de conexión (`mongodb+srv://usuario:clave@cluster...mongodb.net/stickerbot?retryWrites=true&w=majority`).
 
-### Paso 4: Desplegar con Docker en Render (Plan Free)
+### Paso 3: Desplegar con Docker en Render (Plan Free)
 1. Inicia sesión en [render.com](https://render.com) con tu cuenta de GitHub.
 2. Haz clic en **New + → Web Service** y selecciona tu repositorio de StickerBot.
 3. En **Language / Runtime**, elige **Docker** (Render detectará automáticamente el `Dockerfile`).
@@ -52,7 +49,7 @@ Render Free reinicia el disco cada cierto tiempo. Con MongoDB Atlas gratuito (M0
    - `MONGODB_URI` = *(pega aquí tu enlace de MongoDB Atlas del Paso 3)*
 7. Haz clic en **Create Web Service** y espera unos minutos a que Render construya la imagen Docker (incluye Node 22 y FFmpeg completo).
 
-### Paso 5: Mantener despierto Render Free con cron-job.org
+### Paso 4: Mantener despierto Render Free con cron-job.org
 El plan gratuito de Render entra en reposo tras 15 minutos sin tráfico HTTP. Para evitar que se duerma:
 1. Crea una cuenta gratuita en [cron-job.org](https://cron-job.org).
 2. Haz clic en **Create Cronjob**.
@@ -60,7 +57,7 @@ El plan gratuito de Render entra en reposo tras 15 minutos sin tráfico HTTP. Pa
 4. En **Execution schedule**, configúralo cada **10 minutos** (o cada 12–14 minutos).
 5. Guarda y activa el cronjob. El endpoint `/health` responde `200 OK` al instante sin tocar WhatsApp ni la base de datos.
 
-### Paso 6: Vincular tu WhatsApp desde el panel web
+### Paso 5: Vincular tu WhatsApp desde el panel web
 1. Abre tu URL de Render (`https://TU-SERVICIO.onrender.com`).
 2. Entra a la pestaña **Panel WhatsApp** y registra tu usuario + PIN.
 3. Elige **Código QR** o **Código de 8 dígitos** (escribiendo tu número con código de país, por ejemplo `51999888777` sin `+`) y vincúlalo en **WhatsApp → Dispositivos vinculados**.
