@@ -7,7 +7,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 # Instalar yt-dlp y gallery-dl después de tener pip
-RUN pip3 install --no-cache-dir yt-dlp gallery-dl
+RUN pip3 install --no-cache-dir --break-system-packages yt-dlp gallery-dl
 
 WORKDIR /app
 
