@@ -1105,20 +1105,28 @@ export async function resolveMediaFromUrl(
     try {
       const res = await httpGetBuffer(rawUrl, maxBytes, options.signal);
       const ctype = res.contentType.split(';')[0].trim();
+      const guessedExt = extFromUrl(res.finalUrl);
+      const knownExt = guessedExt
+        ? ['jpg','jpeg','png','webp','gif','mp4','webm','mov','mkv','mp3','m4a','ogg'].includes(guessedExt)
+        : false;
+
       if (
         ctype.startsWith('image/') ||
         ctype.startsWith('video/') ||
-        ctype.startsWith('audio/')
+        ctype.startsWith('audio/') ||
+        ((ctype === 'application/octet-stream' || ctype === '' || ctype === 'binary/octet-stream') && knownExt)
       ) {
-        const ext = EXT_BY_MIME[ctype] || extFromUrl(res.finalUrl) || 'bin';
+        const ext = EXT_BY_MIME[ctype] || guessedExt || 'bin';
         const kind: MediaKind =
           ctype === 'image/gif'
             ? 'animated'
-            : ctype.startsWith('image/')
+            : ctype.startsWith('image/') || ['jpg','jpeg','png','webp'].includes(ext)
               ? 'image'
-              : ctype.startsWith('video/')
-                ? 'video'
-                : 'audio';
+              : ['gif'].includes(ext)
+                ? 'animated'
+                : ['mp3','m4a','ogg'].includes(ext)
+                  ? 'audio'
+                  : 'video';
         return { buffer: res.buffer, extension: ext, kind, sourceUrl: rawUrl };
       }
     } catch (err) {
