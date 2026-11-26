@@ -196,7 +196,7 @@ export function resolveTrimWindow(
 
 /**
  * Detecta si un comando de video (/gif, /stickeranimado, /stickeraudio) pidio mantener
- * la proporcion completa (`completo` o `-full`) o usar el recorte cuadrado centrado por defecto.
+ * la proporción completa (`completo` o `-full`) o usar el recorte cuadrado centrado por defecto.
  */
 export function parseVideoCropMode(argsText: string): VideoCropMode {
   const tokens = (argsText || '')
@@ -208,6 +208,159 @@ export function parseVideoCropMode(argsText: string): VideoCropMode {
     return 'full';
   }
   return 'crop';
+}
+
+/**
+ * Parsea un tiempo de inicio en segundos aceptando formatos: número, número+s, mm:ss, hh:mm:ss.
+ * Devuelve el tiempo en segundos o null si es inválido.
+ */
+export function parseStartTime(raw: string): number | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const s = raw.trim();
+
+  // Formato hh:mm:ss
+  const hhmmss = s.match(/^(\d{1,2}):(\d{2}):(\d{2})$/);
+  if (hhmmss) {
+    const h = parseInt(hhmmss[1], 10);
+    const m = parseInt(hhmmss[2], 10);
+    const sec = parseInt(hhmmss[3], 10);
+    if (h >= 0 && m >= 0 && sec >= 0) return h * 3600 + m * 60 + sec;
+    return null;
+  }
+
+  // Formato mm:ss o ss puros
+  const mmss = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (mmss) {
+    const min = parseInt(mmss[1], 10);
+    const sec = parseInt(mmss[2], 10);
+    if (min >= 0 && sec >= 0) return min * 60 + sec;
+    return null;
+  }
+
+  // Número puro con sufijo opcional 's'
+  const num = s.replace(/s$/, '').trim();
+  const val = Number(num);
+  if (!Number.isFinite(val) || val < 0) return null;
+  return val;
+}
+
+/**
+ * Valida que una URL no tenga SSRF (sin credenciales, sin localhost, sin IPs privadas).
+ * Retorna la URL limpia o lanza error.
+ */
+export function validateUrlAntiSsrf(rawUrl: string): string {
+  let url = (rawUrl || '').trim();
+  if (!url) throw new Error('Pega una URL válida.');
+
+  // Debe empezar con http:// o https://
+  if (!(url.startsWith('http://') || url.startsWith('https://'))) {
+    throw new Error('La URL debe comenzar con http:// o https://');
+  }
+
+  // No permitir credenciales user:pass@
+  if (url.includes('@')) {
+    throw new Error('No se permiten credenciales (user:pass@) dentro de la URL.');
+  }
+
+  // Parsear y validar hostname
+  try {
+    const p = new URL(url);
+    const host = p.hostname.toLowerCase();
+
+    // No permitir localhost/.local
+    if (host === 'localhost' || host === 'localhost.localdomain') {
+      throw new Error('No se permiten direcciones localhost.');
+    }
+    if (host.endsWith('.localhost') || host.endsWith('.local')) {
+      throw new Error('No se permiten direcciones .localhost o .local.');
+    }
+
+    // No permitir IPs privadas o locales
+    try {
+      const ip = p.hostname; // Keep original for ipaddress check
+      const parsedIp = new ipaddress.ip_address(ip);
+      if (!parsedIp.isGlobal) {
+        throw new Error('No se permiten direcciones IP privadas o locales.');
+      }
+    } catch (e) {
+      // No es una IP, es un hostname - está bien
+      if (e instanceof Error && !e.message.includes('isGlobal')) throw e;
+    }
+  } catch (e: any) {
+    if (e.message && !e.message.includes('No se permiten')) throw e;
+    throw new Error('URL inválida.');
+  }
+
+  return url;
+}
+
+/**
+ * Detecta si un comando de video incluye un tiempo de inicio.
+ * Retorna el tiempo en segundos o null.
+ */
+export function extractStartTimeFromArgs(argsText: string): number | null {
+  const tokens = (argsText || '')
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  for (let i = 0; i < tokens.length; i++) {
+    const start = parseStartTime(tokens[i]);
+    if (start !== null) {
+      // Verificar que el siguiente token no sea 'completo' o '-full'
+      if (tokens[i + 1] && (tokens[i + 1] === 'completo' || tokens[i + 1] === '-full')) {
+        // El tiempo va antes de completo/-full, está bien
+      }
+      return start;
+    }
+  }
+  return null;
+}
+
+/**
+ * Separa la URL y el tiempo de inicio de los argumentos del comando.
+ * Retorna { url, startTimeSeconds, restArgs }.
+ */
+export function parseUrlAndStartTime(argsText: string): { url: string | null; startTime: number | null; restArgs: string } {
+  const tokens = (argsText || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  let url: string | null = null;
+  let startTime: number | null = null;
+  const rest: string[] = [];
+
+  let i = 0;
+  while (i < tokens.length) {
+    const token = tokens[i];
+    const start = parseStartTime(token);
+    if (start !== null && startTime === null) {
+      // Este es un tiempo de inicio
+      startTime = start;
+      i++;
+      continue;
+    }
+    // Verificar si es modo completo/-full
+    if (token === 'completo' || token === '-full') {
+      i++;
+      continue;
+    }
+    // Si aún no tenemos URL, podría ser una URL
+    if (url === null) {
+      // Validar rápidamente si parece una URL
+      if ((token.startsWith('http://') || token.startsWith('https://'))) {
+        url = token;
+        i++;
+        continue;
+      }
+    }
+    rest.push(token);
+    i++;
+  }
+
+  return { url: url || null, startTime: startTime || null, restArgs: rest.join(' ') };
 }
 
 export function buildVideoScaleFilter(fps: number, size: number, cropMode: VideoCropMode): string {

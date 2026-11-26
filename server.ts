@@ -1,5 +1,7 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import express from 'express';
 import multer from 'multer';
 import { config, getSystemCapabilities, ROOT_DIR } from './server/config.ts';
@@ -22,6 +24,7 @@ import {
   validateUserId,
 } from './server/bot/validation.ts';
 import { handleStickerCreate } from './server/routes/stickerCreate.ts';
+import { downloadUrl } from './server/bot/mediaProcessors.ts';
 
 async function bootstrap(): Promise<void> {
   const app = express();
@@ -253,6 +256,69 @@ async function bootstrap(): Promise<void> {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'No se pudo guardar el grupo autorizado.';
       res.status(400).json({ error: message });
+    }
+  });
+
+  // Endpoint para descargar URLs directas (bench downloader fallback)
+  app.post('/api/download', async (req, res) => {
+    try {
+      const { url, format } = req.body as { url: string; format?: string };
+      if (!url) {
+        res.status(400).json({ error: 'URL requerida.' });
+        return;
+      }
+
+      // Usar BENCH_DOWNLOADER_URL si está configurado
+      if (config.benchDownloaderUrl) {
+        // Llamar al servicio externo
+        const fetch = (await import('node-fetch')).default;
+        const externalRes = await fetch(`${config.benchDownloaderUrl}/download`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, format }),
+        });
+        if (!externalRes.ok) {
+          const errText = await externalRes.text();
+          res.status(500).json({ error: 'Error en servicio external: ' + errText });
+          return;
+        }
+        const data = await externalRes.json();
+        // Retornar la URL del archivo
+        res.json({ ok: true, fileUrl: data.fileUrl });
+        return;
+      }
+
+      // Descarga local directa
+      const maxBytes = format === 'video' ? config.maxVideoBytes : config.maxImageBytes;
+      const buffer = await downloadUrl(url, maxBytes);
+
+      // Guardar en tmp y retornar nombre de archivo
+      const jobId = crypto.randomUUID();
+      const filePath = path.join(os.tmpdir(), `stickerbot-download-${jobId}`);
+      await fs.writeFile(filePath, buffer);
+
+      res.json({ ok: true, filePath: `/file/${jobId}` });
+    } catch (err: any) {
+      const message = err instanceof Error ? err.message : 'Error desconocido';
+      res.status(400).json({ error: message });
+    }
+  });
+
+  app.get('/api/file/:jobId', async (req, res) => {
+    try {
+      const { jobId } = req.params;
+      const filePath = path.join(os.tmpdir(), `stickerbot-download-${jobId}`);
+
+      if (!fs.existsSync(filePath)) {
+        res.status(404).json({ error: 'Archivo no encontrado.' });
+        return;
+      }
+
+      const filename = path.basename(filePath);
+      res.download(filePath, filename);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Error desconocido';
+      res.status(500).json({ error: message });
     }
   });
 

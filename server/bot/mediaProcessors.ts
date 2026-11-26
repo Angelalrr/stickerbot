@@ -1,6 +1,9 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
+import http from 'node:http';
+import https from 'node:https';
+import url from 'node:url';
 import sharp from 'sharp';
 import webpmux from 'node-webpmux';
 import {
@@ -8,12 +11,16 @@ import {
   prepareWAMessageMedia,
   proto,
 } from '@whiskeysockets/baileys';
-import { checkFfmpegAvailable } from '../config.ts';
+import { checkFfmpegAvailable, config } from '../config.ts';
 import {
   buildVideoScaleFilter,
   escapeXml,
   parseTextStickerArgs,
   type VideoCropMode,
+  parseStartTime,
+  extractStartTimeFromArgs,
+  parseUrlAndStartTime,
+  validateUrlAntiSsrf,
 } from './validation.ts';
 import {
   attachAudioToSticker,
@@ -827,3 +834,64 @@ export async function sendNativeSoundSticker(params: {
     detachAudioFromSticker(sticker.fileSha256);
   }
 }
+
+/**
+ * Descarga una URL directa y retorna un Buffer.
+ * Valida SSRF, respeta límites de tamaño y usa los headers apropiados.
+ */
+async function downloadUrl(rawUrl: string, maxBytes: number): Promise<Buffer> {
+  const url = validateUrlAntiSsrf(rawUrl);
+  const parsed = new URL(url);
+
+  return new Promise((resolve, reject) => {
+    const protocol = parsed.protocol === 'https:' ? https : http;
+    const options: https.RequestOptions | http.RequestOptions = {
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: parsed.pathname + parsed.search,
+      method: 'GET',
+      timeout: 60000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36',
+        'Accept': '*/*',
+      },
+    };
+
+    const req = protocol.request(options, (res) => {
+      let data = '';
+      let size = 0;
+
+      res.on('data', (chunk: string) => {
+        size += chunk.length;
+        if (size > maxBytes) {
+          req.destroy();
+          reject(new Error(`Archivo demasiado grande (>${Math.round(maxBytes / (1024 * 1024))} MB).`));
+          return;
+        }
+        data += chunk;
+      });
+
+      res.on('end', () => {
+        try {
+          const buffer = Buffer.from(data, 'utf8');
+          resolve(buffer);
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+
+    req.on('error', (err) => {
+      reject(err);
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Timeout al descargar la URL.'));
+    });
+
+    req.end();
+  );
+}
+
+export { downloadUrl };

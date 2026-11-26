@@ -102,6 +102,7 @@ export function StickerCreator({
   const [trimEnd, setTrimEnd] = useState(0);
   const [cropFull, setCropFull] = useState(false);
   const [withSound, setWithSound] = useState(false);
+  const [trimStartInput, setTrimStartInput] = useState('');
   const [previewing, setPreviewing] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const isGif = videoFile?.type === 'image/gif';
@@ -424,6 +425,7 @@ export function StickerCreator({
         form.append('trimDuration', String(isGif ? maxVideoSeconds : selectedDuration));
         form.append('cropMode', cropFull ? 'completo' : 'centrado');
         form.append('withSound', withSound ? 'true' : 'false');
+        form.append('trimStartInput', trimStartInput || '');
       } else {
         form.append('mode', 'text');
         form.append('groupJid', selectedGroupJid);
@@ -781,16 +783,24 @@ export function StickerCreator({
                         <label htmlFor="trim-start" className="block text-xs font-semibold text-slate-600">
                           Inicio: {formatSeconds(trimStart)}
                         </label>
-                        <input
-                          id="trim-start"
-                          type="range"
-                          min={0}
-                          max={Math.max(0, round2((videoDuration ?? 0) - 0.5))}
-                          step={0.1}
-                          value={trimStart}
-                          onChange={(e) => handleTrimStartChange(Number(e.target.value))}
-                          className="w-full accent-green-700"
-                        />
+                        <div className="flex items-center gap-2">
+                          <input
+                            id="trim-start"
+                            type="number"
+                            min={0}
+                            max={Math.max(0, round2((videoDuration ?? 0) - 0.5))}
+                            step={0.5}
+                            value={formatSeconds(trimStart)}
+                            onChange={(e) => {
+                              const v = Number(e.target.value);
+                              if (!isNaN(v) && v >= 0 && v < (videoDuration ?? 0)) {
+                                setTrimStart(v);
+                                setTrimStartInput(e.target.value);
+                              }
+                            }}
+                          />
+                          <span className="text-xs text-slate-500">s</span>
+                        </div>
                       </div>
                       <div className="space-y-1.5">
                         <label htmlFor="trim-end" className="block text-xs font-semibold text-slate-600">

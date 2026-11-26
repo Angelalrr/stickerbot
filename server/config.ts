@@ -41,6 +41,7 @@ export const config = Object.freeze({
     : 100,
 
   logLevel: (process.env.LOG_LEVEL || 'info').trim().toLowerCase(),
+  benchDownloaderUrl: (process.env.BENCH_DOWNLOADER_URL || '').trim(),
   dataDir: path.join(ROOT_DIR, 'data'),
 });
 

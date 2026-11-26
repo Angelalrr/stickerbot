@@ -15,6 +15,7 @@ import {
   probeVideoBuffer,
   textToStickerWebp,
   videoToAnimatedStickerWebp,
+  downloadUrl,
 } from '../bot/mediaProcessors.ts';
 
 export type StickerCreateMode = 'image' | 'video' | 'text';
@@ -103,6 +104,11 @@ export async function handleStickerCreate(
       const cropMode = parseVideoCropMode(String(req.body?.cropMode || ''));
       const withSound = req.body?.withSound === 'true' || req.body?.withSound === '1';
 
+      // Parsear tiempo de inicio desde el campo del formulario web
+      // Acepta: 15, 15s, 0:15, 1:20, 1:02:10
+      const startTimeStr = String(req.body?.trimStart || '');
+      const startSec = parseStartTime(startTimeStr);
+
       const probe = await probeVideoBuffer(buffer as Buffer, { extension });
       const trim = resolveTrimWindow(
         req.body?.trimStart,
@@ -123,6 +129,9 @@ export async function handleStickerCreate(
         return;
       }
 
+      // Si se proporciona un tiempo de inicio en los argumentos, usarlo en lugar de trim.start
+      const effectiveTrimStart = startSec > 0 ? startSec : trim.start;
+
       const stickerResult = await videoToAnimatedStickerWebp(buffer as Buffer, {
         extension,
         maxSeconds: config.maxVideoSeconds,
@@ -130,7 +139,7 @@ export async function handleStickerCreate(
         packName: config.stickerPack,
         authorName: config.stickerAuthor,
         cropMode,
-        trimStart: trim.start,
+        trimStart: effectiveTrimStart,
         trimDuration: trim.duration,
       });
 

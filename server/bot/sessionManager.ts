@@ -19,6 +19,10 @@ import {
   maskJid,
   parseCommand,
   parseVideoCropMode,
+  parseStartTime,
+  extractStartTimeFromArgs,
+  parseUrlAndStartTime,
+  validateUrlAntiSsrf,
   sanitizePhoneForPairing,
   validateMediaBuffer,
 } from './validation.ts';
@@ -638,8 +642,11 @@ export class MultiUserSessionManager {
               '*Stickers:*',
               '• */sticker* o */s* — Convierte una foto en sticker 512x512.',
               '• */stickertexto <texto>* — Sticker transparente con texto.',
-              '• */gif* o */stickeranimado* — Sticker animado (recorte cuadrado centrado por defecto; usa *completo* o *-full* para ver todo el encuadre).',
+              '• */gif* o */stickeranimado* — Sticker animado (recorte centrado 512×512 por defecto; usa *completo* o *-full* para ver todo el video).',
+              '  • Ejemplo: `/gif https://vm.tiktok.com/... 0:15` — inicia en 15s',
+              '  • Ejemplo: `/stickeranimado https://youtu.be/... completo` — video sin recortar',
               '• */stickeraudio* — Sound Sticker nativo sincronizado (admite *completo* o *-full*).',
+              '  • Ejemplo: `/stickeraudio https://vm.tiktok.com/... 0:08` — inicio 8s con audio',
             ].join('\n'),
             msg
           );
@@ -657,7 +664,13 @@ export class MultiUserSessionManager {
               '*2. Texto:* Escribe */stickertexto rojo ¡Hola!*',
               `*3. Videos y GIFs (máx. ${config.maxVideoSeconds}s):* Responde con */gif*, */stickeranimado* o */stickeraudio*.`,
               'Por defecto recorto el video al centro en formato cuadrado 1:1. Si quieres conservar bordes sin recortar, escribe */stickeranimado completo* o */stickeraudio -full*.',
-              '*4. Cambiar grupo:* Envía *//pingdiag* en otro grupo para ver su ID.',
+              '',
+              '*4. Tiempo de inicio en videos:* Acepta inicio en comando o replying a URL:',
+              '  • Formatos: `15`, `15s`, `0:15`, `1:20`, `1:02:10`',
+              '  • Ejemplo: `/gif https://vm.tiktok.com/... 0:15` — inicia en 15s',
+              '  • Ejemplo: `/stickeranimado 1:20 video.mp4` — inicia en 1min 20s',
+              '  • Ejemplo: `/stickeraudio https://youtu.be/... 0:08` — inicio 8s con audio',
+              '*5. Cambiar grupo:* Envía *//pingdiag* en otro grupo para ver su ID.',
             ].join('\n'),
             msg
           );
@@ -763,7 +776,7 @@ export class MultiUserSessionManager {
               rt,
               sock,
               remoteJid,
-              'Responde a un GIF o video corto con */gif* o */stickeranimado* (añade *completo* o *-full* si no quieres recorte cuadrado).',
+              'Responde a un GIF o video corto con */gif* o */stickeranimado* (añade *completo* o *-full* para ver todo el encuadre).',
               msg
             );
             return;
@@ -801,6 +814,10 @@ export class MultiUserSessionManager {
           const ext = mime.includes('gif') ? 'gif' : mime.includes('webm') ? 'webm' : 'mp4';
           const cropMode = parseVideoCropMode(argsText);
 
+          // Parsear tiempo de inicio de los argumentos del comando
+          const { url, startTime } = parseUrlAndStartTime(argsText);
+          const startSec = startTime !== null ? startTime : 0;
+
           await this.replyText(rt, sock, remoteJid, 'Procesando sticker animado, espera unos segundos...', msg);
           const { buffer: webpBuffer } = await videoToAnimatedStickerWebp(buffer, {
             extension: ext,
@@ -809,6 +826,7 @@ export class MultiUserSessionManager {
             packName: config.stickerPack,
             authorName: config.stickerAuthor,
             cropMode,
+            trimStart: startSec,
             signal: controller.signal,
           });
           await this.sendTracked(rt, sock, remoteJid, { sticker: webpBuffer }, { quoted: msg });
@@ -851,6 +869,10 @@ export class MultiUserSessionManager {
             return;
           }
 
+          // Parsear tiempo de inicio de los argumentos del comando
+          const { startTime } = parseUrlAndStartTime(argsText);
+          const startSec = startTime !== null ? startTime : 0;
+
           const cropMode = parseVideoCropMode(argsText);
           await this.replyText(rt, sock, remoteJid, 'Creando Sound Sticker sincronizado, espera unos segundos...', msg);
 
@@ -861,6 +883,7 @@ export class MultiUserSessionManager {
             packName: config.stickerPack,
             authorName: config.stickerAuthor,
             cropMode,
+            trimStart: startSec,
             signal: controller.signal,
           });
 
@@ -871,6 +894,7 @@ export class MultiUserSessionManager {
               ? stickerResult.duration
               : Math.min(probe.duration || config.maxVideoSeconds, config.maxVideoSeconds);
 
+          // Aplicar el mismo inicio al audio con leadMs para sincronización
           const audioResult = await extractSynchronizedAudio({
             inputBuffer: buffer,
             extension: 'mp4',
