@@ -25,3 +25,13 @@ services:
         value: "32"
       - key: AUDIO_LEAD_MS
         value: "100"
+      - key: YTDLP_JS_RUNTIME
+        value: deno
+      - key: YTDLP_COOKIES_FILE
+        sync: false
+      - key: YTDLP_COOKIES
+        sync: false
+      - key: YTDLP_EXTRACTOR_ARGS
+        sync: false
+      - key: BENCH_DOWNLOADER_URL
+        sync: false

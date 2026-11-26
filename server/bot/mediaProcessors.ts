@@ -880,6 +880,27 @@ function isPinterestHost(host: string): boolean {
   );
 }
 
+/** Sitios donde el og:image es solo la miniatura: no sirve como sticker real. */
+function isKnownVideoSite(host: string): boolean {
+  const roots = [
+    'youtube.com',
+    'youtu.be',
+    'tiktok.com',
+    'instagram.com',
+    'facebook.com',
+    'fb.watch',
+    'twitter.com',
+    'x.com',
+    'vimeo.com',
+    'twitch.tv',
+    'dailymotion.com',
+    'streamable.com',
+    'reddit.com',
+    'redd.it',
+  ];
+  return roots.some((root) => host === root || host.endsWith(`.${root}`));
+}
+
 /**
  * GET con validación SSRF en cada salto de redirección.
  */
@@ -998,23 +1019,120 @@ async function findFirstMediaFile(dir: string): Promise<string | null> {
   return null;
 }
 
+const binaryCache = new Map<string, boolean>();
+
+async function hasBinary(bin: string): Promise<boolean> {
+  const cached = binaryCache.get(bin);
+  if (cached !== undefined) return cached;
+  return new Promise((resolve) => {
+    try {
+      const child = spawn(bin, ['--version'], { windowsHide: true });
+      const timer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // Ignorar
+        }
+        binaryCache.set(bin, false);
+        resolve(false);
+      }, 4000);
+      child.on('error', () => {
+        clearTimeout(timer);
+        binaryCache.set(bin, false);
+        resolve(false);
+      });
+      child.on('close', () => {
+        clearTimeout(timer);
+        binaryCache.set(bin, true);
+        resolve(true);
+      });
+    } catch {
+      binaryCache.set(bin, false);
+      resolve(false);
+    }
+  });
+}
+
+let cachedCookiesPath: string | null | undefined;
+
+async function resolveCookiesFile(): Promise<string | null> {
+  if (cachedCookiesPath !== undefined) return cachedCookiesPath;
+  if (config.ytdlpCookiesFile) {
+    try {
+      await fs.access(config.ytdlpCookiesFile);
+      cachedCookiesPath = config.ytdlpCookiesFile;
+      return cachedCookiesPath;
+    } catch {
+      // Si no existe, seguir con el contenido inline si lo hay
+    }
+  }
+  if (config.ytdlpCookies) {
+    let content = config.ytdlpCookies;
+    // Permitir cookies en base64 (útil en variables de entorno de Render).
+    if (!content.includes('\t') && !content.includes('# Netscape')) {
+      try {
+        const decoded = Buffer.from(content, 'base64').toString('utf8');
+        if (decoded.includes('\t') || decoded.includes('# Netscape')) content = decoded;
+      } catch {
+        // Mantener el valor original
+      }
+    }
+    const cookiePath = path.join(os.tmpdir(), `${TEMP_PREFIX}cookies.txt`);
+    try {
+      await fs.writeFile(cookiePath, content, { mode: 0o600 });
+      cachedCookiesPath = cookiePath;
+    } catch {
+      cachedCookiesPath = null;
+    }
+    return cachedCookiesPath;
+  }
+  cachedCookiesPath = null;
+  return null;
+}
+
+async function buildYtDlpExtraArgs(): Promise<string[]> {
+  const extra: string[] = [];
+
+  // Runtime JS para resolver retos de YouTube (deno).
+  const runtime = config.ytdlpJsRuntime;
+  if (runtime && (await hasBinary(runtime))) {
+    extra.push('--js-runtimes', runtime);
+  }
+
+  // Cookies para "Sign in to confirm you're not a bot".
+  const cookiePath = await resolveCookiesFile();
+  if (cookiePath) {
+    extra.push('--cookies', cookiePath);
+  }
+
+  // Extractor args opcionales (ej. youtube:player_client=default,web_safari).
+  if (config.ytdlpExtractorArgs) {
+    extra.push('--extractor-args', config.ytdlpExtractorArgs);
+  }
+
+  return extra;
+}
+
 async function runExternalDownloader(
   bin: string,
   args: string[],
   outDir: string,
   maxBytes: number,
   signal?: AbortSignal
-): Promise<ResolvedMedia | null> {
+): Promise<{ media: ResolvedMedia | null; error: string | null }> {
+  let error: string | null = null;
   try {
     await runProcess(bin, args, { signal, timeoutMs: 180000 });
-  } catch {
-    return null;
+  } catch (err) {
+    error = err instanceof Error ? err.message : 'Error al ejecutar el descargador';
+    return { media: null, error };
   }
   const file = await findFirstMediaFile(outDir);
-  if (!file) return null;
+  if (!file) return { media: null, error: 'No se encontró ningún archivo descargado.' };
   try {
     const stat = await fs.stat(file);
-    if (stat.size <= 0 || stat.size > maxBytes) return null;
+    if (stat.size <= 0) return { media: null, error: 'El archivo descargado está vacío.' };
+    if (stat.size > maxBytes) return { media: null, error: 'El archivo supera el tamaño máximo.' };
     const buffer = await fs.readFile(file);
     const extension = path.extname(file).slice(1).toLowerCase() || 'bin';
     const kind: MediaKind =
@@ -1025,17 +1143,21 @@ async function runExternalDownloader(
           : ['mp3','m4a'].includes(extension)
             ? 'audio'
             : 'video';
-    return { buffer, extension, kind, sourceUrl: '' };
-  } catch {
-    return null;
+    return { media: { buffer, extension, kind, sourceUrl: '' }, error: null };
+  } catch (err) {
+    return { media: null, error: err instanceof Error ? err.message : 'Error leyendo el archivo.' };
   }
 }
+
+let lastYtDlpError: string | null = null;
 
 async function tryYtDlp(url: string, maxBytes: number, signal?: AbortSignal): Promise<ResolvedMedia | null> {
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), `${TEMP_PREFIX}yt-`));
   try {
     const template = path.join(outDir, 'media.%(ext)s');
+    const extra = await buildYtDlpExtraArgs();
     const baseArgs = [
+      ...extra,
       '-o', template,
       '--no-playlist',
       '--no-warnings',
@@ -1043,15 +1165,26 @@ async function tryYtDlp(url: string, maxBytes: number, signal?: AbortSignal): Pr
       '-f', 'bv*[height<=720]+ba/b[height<=720]/b',
       '--merge-output-format', 'mp4',
       '--max-filesize', String(maxBytes),
-      '--retries', '3',
-      '--fragment-retries', '3',
-      '--trim-filenames', '120',
+      '--retries', '5',
+      '--fragment-retries', '5',
+      '--file-access-retries', '3',
+      '--concurrent-fragments', '4',
+      '--trim-filenames', '150',
+      '--output-na-placeholder', 'unknown',
       url,
     ];
-    return (
-      (await runExternalDownloader('yt-dlp', baseArgs, outDir, maxBytes, signal)) ||
-      (await runExternalDownloader('python3', ['-m', 'yt_dlp', ...baseArgs], outDir, maxBytes, signal))
+    const first = await runExternalDownloader('yt-dlp', baseArgs, outDir, maxBytes, signal);
+    if (first.media) return first.media;
+    const second = await runExternalDownloader(
+      'python3',
+      ['-m', 'yt_dlp', ...baseArgs],
+      outDir,
+      maxBytes,
+      signal
     );
+    if (second.media) return second.media;
+    lastYtDlpError = first.error || second.error || 'yt-dlp no pudo descargar el video.';
+    return null;
   } finally {
     await fs.rm(outDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -1061,12 +1194,54 @@ async function tryGalleryDl(url: string, maxBytes: number, signal?: AbortSignal)
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), `${TEMP_PREFIX}gdl-`));
   try {
     const args = ['--dest', outDir, url];
-    return (
-      (await runExternalDownloader('gallery-dl', args, outDir, maxBytes, signal)) ||
-      (await runExternalDownloader('python3', ['-m', 'gallery_dl', ...args], outDir, maxBytes, signal))
-    );
+    const first = await runExternalDownloader('gallery-dl', args, outDir, maxBytes, signal);
+    if (first.media) return first.media;
+    const second = await runExternalDownloader('python3', ['-m', 'gallery_dl', ...args], outDir, maxBytes, signal);
+    return second.media;
   } finally {
     await fs.rm(outDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Respaldo opcional: usa un servicio tipo "bench downloader"
+ * (POST /download -> files[].url) configurado en BENCH_DOWNLOADER_URL.
+ */
+async function tryBenchDownloader(url: string, maxBytes: number): Promise<ResolvedMedia | null> {
+  const base = config.benchDownloaderUrl.replace(/\/+$/, '');
+  if (!base) return null;
+  try {
+    const response = await fetch(`${base}/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, format: '720p' }),
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as {
+      files?: Array<{ url?: string; filename?: string }>;
+    };
+    const first = data.files?.find((f) => f.url);
+    if (!first?.url) return null;
+
+    const fileUrl = first.url.startsWith('http') ? first.url : `${base}${first.url}`;
+    const fileRes = await fetch(fileUrl);
+    if (!fileRes.ok) return null;
+    const arrayBuffer = await fileRes.arrayBuffer();
+    if (arrayBuffer.byteLength <= 0 || arrayBuffer.byteLength > maxBytes) return null;
+
+    const buffer = Buffer.from(arrayBuffer);
+    const guessedExt = extFromUrl(first.filename || first.url) || 'mp4';
+    const kind: MediaKind =
+      ['jpg','jpeg','png','webp'].includes(guessedExt)
+        ? 'image'
+        : guessedExt === 'gif'
+          ? 'animated'
+          : ['mp3','m4a','ogg'].includes(guessedExt)
+            ? 'audio'
+            : 'video';
+    return { buffer, extension: guessedExt, kind, sourceUrl: url };
+  } catch {
+    return null;
   }
 }
 
@@ -1082,6 +1257,37 @@ function scrapeOgImage(html: string): string | null {
     if (m && m[1]) return m[1].replace(/&amp;/g, '&');
   }
   return null;
+}
+
+/** Convierte el stderr de yt-dlp en un mensaje corto y entendible. */
+function summarizeExternalError(raw: string | null): string | null {
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+
+  if (lower.includes('sign in to confirm') || lower.includes("you're not a bot") || lower.includes('not a bot')) {
+    return 'YouTube pide iniciar sesión (bot-check). Configura YTDLP_COOKIES o YTDLP_COOKIES_FILE.';
+  }
+  if (lower.includes('no supported javascript runtime') || lower.includes('javascript runtime')) {
+    return 'Falta el runtime JS (deno) que YouTube necesita.';
+  }
+  if (lower.includes('private video')) return 'El video es privado.';
+  if (lower.includes('is not available') || lower.includes('video unavailable')) {
+    return 'El video no está disponible (bloqueado, regional o eliminado).';
+  }
+  if (lower.includes('age-restricted') || lower.includes('age restricted')) {
+    return 'El video tiene restricción de edad; requiere cookies.';
+  }
+  if (lower.includes('requested format is not available')) {
+    return 'No hay un formato compatible disponible.';
+  }
+
+  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const errorLine = [...lines].reverse().find((line) => /ERROR:/i.test(line));
+  const picked = errorLine || lines[lines.length - 1];
+  if (!picked) return null;
+  const marker = picked.toUpperCase().lastIndexOf('ERROR:');
+  const clean = marker >= 0 ? picked.slice(marker + 6).trim() : picked;
+  return clean.slice(0, 240);
 }
 
 /**
@@ -1100,6 +1306,7 @@ export async function resolveMediaFromUrl(
 
   return videoProcessingQueue.run(async () => {
     let directError: string | null = null;
+    lastYtDlpError = null;
 
     // 1) Descarga directa (imagen/video servido tal cual)
     try {
@@ -1146,31 +1353,40 @@ export async function resolveMediaFromUrl(
     const yt = await tryYtDlp(rawUrl, maxBytes, options.signal);
     if (yt) return { ...yt, sourceUrl: rawUrl };
 
-    // 4) Fallback og:image para fotos de páginas web
-    try {
-      const page = await httpGetBuffer(rawUrl, Math.min(maxBytes, 3 * 1024 * 1024), options.signal);
-      const html = page.buffer.toString('utf8');
-      const imageUrl = scrapeOgImage(html);
-      if (imageUrl) {
-        const img = await httpGetBuffer(imageUrl, maxBytes, options.signal);
-        const ctype = img.contentType.split(';')[0].trim();
-        if (ctype.startsWith('image/')) {
-          const ext = EXT_BY_MIME[ctype] || extFromUrl(img.finalUrl) || 'jpg';
-          return {
-            buffer: img.buffer,
-            extension: ext,
-            kind: ctype === 'image/gif' ? 'animated' : 'image',
-            sourceUrl: imageUrl,
-          };
+    // 3b) Respaldo opcional: servicio externo tipo bench downloader
+    const bench = await tryBenchDownloader(rawUrl, maxBytes);
+    if (bench) return bench;
+
+    // 4) Fallback og:image para fotos de páginas web (no para sitios de video)
+    if (!isKnownVideoSite(host)) {
+      try {
+        const page = await httpGetBuffer(rawUrl, Math.min(maxBytes, 3 * 1024 * 1024), options.signal);
+        const html = page.buffer.toString('utf8');
+        const imageUrl = scrapeOgImage(html);
+        if (imageUrl) {
+          const img = await httpGetBuffer(imageUrl, maxBytes, options.signal);
+          const ctype = img.contentType.split(';')[0].trim();
+          if (ctype.startsWith('image/')) {
+            const ext = EXT_BY_MIME[ctype] || extFromUrl(img.finalUrl) || 'jpg';
+            return {
+              buffer: img.buffer,
+              extension: ext,
+              kind: ctype === 'image/gif' ? 'animated' : 'image',
+              sourceUrl: imageUrl,
+            };
+          }
         }
+      } catch (err) {
+        if (err instanceof Error && err.message === 'OPERACION_CANCELADA') throw err;
       }
-    } catch (err) {
-      if (err instanceof Error && err.message === 'OPERACION_CANCELADA') throw err;
     }
 
+    const ytError = summarizeExternalError(lastYtDlpError);
+    const details = [directError, ytError].filter(Boolean).join(' | ');
+
     throw new Error(
-      directError
-        ? `No se pudo descargar el link (${directError}).`
+      details
+        ? `No se pudo descargar el link (${details}).`
         : 'No se encontró imagen ni video en ese link.'
     );
   });

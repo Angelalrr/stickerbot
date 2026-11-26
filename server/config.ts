@@ -42,6 +42,11 @@ export const config = Object.freeze({
 
   logLevel: (process.env.LOG_LEVEL || 'info').trim().toLowerCase(),
   benchDownloaderUrl: (process.env.BENCH_DOWNLOADER_URL || '').trim(),
+  // yt-dlp: runtime JS (deno) y cookies para evitar el bot-check de YouTube.
+  ytdlpJsRuntime: (process.env.YTDLP_JS_RUNTIME || 'deno').trim(),
+  ytdlpCookiesFile: (process.env.YTDLP_COOKIES_FILE || '').trim(),
+  ytdlpCookies: (process.env.YTDLP_COOKIES || '').trim(),
+  ytdlpExtractorArgs: (process.env.YTDLP_EXTRACTOR_ARGS || '').trim(),
   dataDir: path.join(ROOT_DIR, 'data'),
 });
 
