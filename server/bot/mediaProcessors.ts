@@ -3,7 +3,8 @@ import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
 import http from 'node:http';
 import https from 'node:https';
-import url from 'node:url';
+import os from 'node:os';
+import path from 'node:path';
 import sharp from 'sharp';
 import webpmux from 'node-webpmux';
 import {
@@ -32,6 +33,7 @@ import {
   createTempJobPath,
   removeTempFiles,
   videoProcessingQueue,
+  TEMP_PREFIX,
 } from './mediaQueue.ts';
 
 const { Image } = webpmux;
@@ -835,15 +837,73 @@ export async function sendNativeSoundSticker(params: {
   }
 }
 
-/**
- * Descarga una URL directa y retorna un Buffer.
- * Valida SSRF, respeta límites de tamaño y usa los headers apropiados.
- */
-async function downloadUrl(rawUrl: string, maxBytes: number): Promise<Buffer> {
-  const url = validateUrlAntiSsrf(rawUrl);
-  const parsed = new URL(url);
+export type MediaKind = 'image' | 'animated' | 'video' | 'audio';
 
+export interface ResolvedMedia {
+  buffer: Buffer;
+  extension: string;
+  kind: MediaKind;
+  sourceUrl: string;
+}
+
+const EXT_BY_MIME: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'video/quicktime': 'mov',
+  'video/x-matroska': 'mkv',
+  'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/ogg': 'ogg',
+};
+
+function extFromUrl(raw: string): string | null {
+  try {
+    const p = new URL(raw).pathname;
+    const m = p.match(/\.([a-z0-9]{2,5})$/i);
+    return m ? m[1].toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPinterestHost(host: string): boolean {
+  return (
+    host === 'pinterest.com' ||
+    host.endsWith('.pinterest.com') ||
+    host === 'pin.it' ||
+    host.endsWith('.pin.it')
+  );
+}
+
+/**
+ * GET con validación SSRF en cada salto de redirección.
+ */
+function httpGetBuffer(
+  rawUrl: string,
+  maxBytes: number,
+  signal?: AbortSignal,
+  redirects = 0
+): Promise<{ buffer: Buffer; contentType: string; finalUrl: string }> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('OPERACION_CANCELADA'));
+      return;
+    }
+
+    let url: string;
+    try {
+      url = validateUrlAntiSsrf(rawUrl);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+
+    const parsed = new URL(url);
     const protocol = parsed.protocol === 'https:' ? https : http;
     const options: https.RequestOptions | http.RequestOptions = {
       hostname: parsed.hostname,
@@ -852,12 +912,35 @@ async function downloadUrl(rawUrl: string, maxBytes: number): Promise<Buffer> {
       method: 'GET',
       timeout: 60000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36',
-        'Accept': '*/*',
+        'User-Agent':
+          'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36',
+        Accept: '*/*',
+        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
       },
     };
 
     const req = protocol.request(options, (res) => {
+      const status = res.statusCode || 0;
+      const location = res.headers.location;
+
+      if (status >= 300 && status < 400 && location) {
+        res.resume();
+        if (redirects >= 6) {
+          reject(new Error('Demasiadas redirecciones.'));
+          return;
+        }
+        const next = new URL(location, url).toString();
+        httpGetBuffer(next, maxBytes, signal, redirects + 1).then(resolve, reject);
+        return;
+      }
+
+      if (status < 200 || status >= 300) {
+        res.resume();
+        reject(new Error(`El servidor respondió HTTP ${status}.`));
+        return;
+      }
+
+      const contentType = String(res.headers['content-type'] || '').toLowerCase();
       const chunks: Buffer[] = [];
       let size = 0;
 
@@ -872,21 +955,221 @@ async function downloadUrl(rawUrl: string, maxBytes: number): Promise<Buffer> {
       });
 
       res.on('end', () => {
-        resolve(Buffer.concat(chunks));
+        resolve({ buffer: Buffer.concat(chunks), contentType, finalUrl: url });
       });
     });
 
+    const onAbort = () => {
+      req.destroy();
+      reject(new Error('OPERACION_CANCELADA'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+
     req.on('error', (err) => {
+      signal?.removeEventListener('abort', onAbort);
       reject(err);
     });
-
     req.on('timeout', () => {
       req.destroy();
       reject(new Error('Timeout al descargar la URL.'));
     });
-
     req.end();
   });
 }
 
-export { downloadUrl };
+async function findFirstMediaFile(dir: string): Promise<string | null> {
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const nested = await findFirstMediaFile(full);
+        if (nested) return nested;
+      } else if (entry.isFile()) {
+        const ext = path.extname(entry.name).toLowerCase().replace('.', '');
+        if (['jpg','jpeg','png','webp','gif','mp4','webm','mov','mkv','m4a','mp3'].includes(ext)) {
+          return full;
+        }
+      }
+    }
+  } catch {
+    // Ignorar
+  }
+  return null;
+}
+
+async function runExternalDownloader(
+  bin: string,
+  args: string[],
+  outDir: string,
+  maxBytes: number,
+  signal?: AbortSignal
+): Promise<ResolvedMedia | null> {
+  try {
+    await runProcess(bin, args, { signal, timeoutMs: 180000 });
+  } catch {
+    return null;
+  }
+  const file = await findFirstMediaFile(outDir);
+  if (!file) return null;
+  try {
+    const stat = await fs.stat(file);
+    if (stat.size <= 0 || stat.size > maxBytes) return null;
+    const buffer = await fs.readFile(file);
+    const extension = path.extname(file).slice(1).toLowerCase() || 'bin';
+    const kind: MediaKind =
+      ['jpg','jpeg','png','webp'].includes(extension)
+        ? 'image'
+        : extension === 'gif'
+          ? 'animated'
+          : ['mp3','m4a'].includes(extension)
+            ? 'audio'
+            : 'video';
+    return { buffer, extension, kind, sourceUrl: '' };
+  } catch {
+    return null;
+  }
+}
+
+async function tryYtDlp(url: string, maxBytes: number, signal?: AbortSignal): Promise<ResolvedMedia | null> {
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), `${TEMP_PREFIX}yt-`));
+  try {
+    const template = path.join(outDir, 'media.%(ext)s');
+    const baseArgs = [
+      '-o', template,
+      '--no-playlist',
+      '--no-warnings',
+      '--ignore-config',
+      '-f', 'bv*[height<=720]+ba/b[height<=720]/b',
+      '--merge-output-format', 'mp4',
+      '--max-filesize', String(maxBytes),
+      '--retries', '3',
+      '--fragment-retries', '3',
+      '--trim-filenames', '120',
+      url,
+    ];
+    return (
+      (await runExternalDownloader('yt-dlp', baseArgs, outDir, maxBytes, signal)) ||
+      (await runExternalDownloader('python3', ['-m', 'yt_dlp', ...baseArgs], outDir, maxBytes, signal))
+    );
+  } finally {
+    await fs.rm(outDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function tryGalleryDl(url: string, maxBytes: number, signal?: AbortSignal): Promise<ResolvedMedia | null> {
+  const outDir = await fs.mkdtemp(path.join(os.tmpdir(), `${TEMP_PREFIX}gdl-`));
+  try {
+    const args = ['--dest', outDir, url];
+    return (
+      (await runExternalDownloader('gallery-dl', args, outDir, maxBytes, signal)) ||
+      (await runExternalDownloader('python3', ['-m', 'gallery_dl', ...args], outDir, maxBytes, signal))
+    );
+  } finally {
+    await fs.rm(outDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function scrapeOgImage(html: string): string | null {
+  const patterns = [
+    /<meta[^>]+property=["']og:image:secure_url["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i,
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (m && m[1]) return m[1].replace(/&amp;/g, '&');
+  }
+  return null;
+}
+
+/**
+ * Resuelve un link en un archivo multimedia real.
+ * - Descarga directa rápida para URLs de imagen/video.
+ * - gallery-dl para Pinterest.
+ * - yt-dlp (<=720p) para páginas de video (YouTube, TikTok, etc.).
+ * - Fallback og:image para fotos de páginas web.
+ * Toda la descarga corre dentro de la cola global (1 tarea pesada a la vez).
+ */
+export async function resolveMediaFromUrl(
+  rawUrl: string,
+  options: { maxBytes: number; signal?: AbortSignal } = { maxBytes: config.maxVideoBytes }
+): Promise<ResolvedMedia> {
+  const maxBytes = options.maxBytes;
+
+  return videoProcessingQueue.run(async () => {
+    let directError: string | null = null;
+
+    // 1) Descarga directa (imagen/video servido tal cual)
+    try {
+      const res = await httpGetBuffer(rawUrl, maxBytes, options.signal);
+      const ctype = res.contentType.split(';')[0].trim();
+      if (
+        ctype.startsWith('image/') ||
+        ctype.startsWith('video/') ||
+        ctype.startsWith('audio/')
+      ) {
+        const ext = EXT_BY_MIME[ctype] || extFromUrl(res.finalUrl) || 'bin';
+        const kind: MediaKind =
+          ctype === 'image/gif'
+            ? 'animated'
+            : ctype.startsWith('image/')
+              ? 'image'
+              : ctype.startsWith('video/')
+                ? 'video'
+                : 'audio';
+        return { buffer: res.buffer, extension: ext, kind, sourceUrl: rawUrl };
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message === 'OPERACION_CANCELADA') throw err;
+      directError = err instanceof Error ? err.message : 'Error de descarga';
+    }
+
+    const host = new URL(validateUrlAntiSsrf(rawUrl)).hostname.toLowerCase();
+
+    // 2) Pinterest: gallery-dl
+    if (isPinterestHost(host)) {
+      const gdl = await tryGalleryDl(rawUrl, maxBytes, options.signal);
+      if (gdl) return { ...gdl, sourceUrl: rawUrl };
+    }
+
+    // 3) yt-dlp para páginas de video
+    const yt = await tryYtDlp(rawUrl, maxBytes, options.signal);
+    if (yt) return { ...yt, sourceUrl: rawUrl };
+
+    // 4) Fallback og:image para fotos de páginas web
+    try {
+      const page = await httpGetBuffer(rawUrl, Math.min(maxBytes, 3 * 1024 * 1024), options.signal);
+      const html = page.buffer.toString('utf8');
+      const imageUrl = scrapeOgImage(html);
+      if (imageUrl) {
+        const img = await httpGetBuffer(imageUrl, maxBytes, options.signal);
+        const ctype = img.contentType.split(';')[0].trim();
+        if (ctype.startsWith('image/')) {
+          const ext = EXT_BY_MIME[ctype] || extFromUrl(img.finalUrl) || 'jpg';
+          return {
+            buffer: img.buffer,
+            extension: ext,
+            kind: ctype === 'image/gif' ? 'animated' : 'image',
+            sourceUrl: imageUrl,
+          };
+        }
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message === 'OPERACION_CANCELADA') throw err;
+    }
+
+    throw new Error(
+      directError
+        ? `No se pudo descargar el link (${directError}).`
+        : 'No se encontró imagen ni video en ese link.'
+    );
+  });
+}
+
+/** Descarga directa simple (compatibilidad). */
+export async function downloadUrl(rawUrl: string, maxBytes: number): Promise<Buffer> {
+  const res = await httpGetBuffer(rawUrl, maxBytes);
+  return res.buffer;
+}

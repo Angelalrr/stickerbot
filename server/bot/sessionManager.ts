@@ -30,6 +30,7 @@ import {
   extractSynchronizedAudio,
   imageToStickerWebp,
   probeVideoBuffer,
+  resolveMediaFromUrl,
   sendNativeSoundSticker,
   textToStickerWebp,
   videoToAnimatedStickerWebp,
@@ -106,6 +107,27 @@ function extractMessageText(messageContent: unknown): string {
       doc?.caption ||
       ''
   ).trim();
+}
+
+/** Extrae el texto del mensaje citado (respondido). */
+function extractQuotedText(rawMsg: WAMessage): string {
+  const content = unwrapMessage(rawMsg?.message as Record<string, unknown> | null);
+  if (!content) return '';
+  const directType = getContentType(content as never);
+  const directObj = directType ? (content[directType] as Record<string, unknown> | undefined) : undefined;
+  const extObj = content.extendedTextMessage as Record<string, unknown> | undefined;
+  const contextInfo = (extObj?.contextInfo || directObj?.contextInfo) as
+    | { quotedMessage?: Record<string, unknown> }
+    | undefined;
+  if (!contextInfo?.quotedMessage) return '';
+  return extractMessageText(contextInfo.quotedMessage);
+}
+
+/** Busca la primera URL http(s) en un texto. */
+function extractFirstUrl(text: string): string | null {
+  if (!text) return null;
+  const match = text.match(/https?:\/\/[^\s]+/i);
+  return match ? match[0].replace(/[)\],.;!?]+$/, '') : null;
 }
 
 function findTargetMedia(
@@ -724,35 +746,61 @@ export class MultiUserSessionManager {
         }
         case 'sticker':
         case 's': {
-          const mediaMatch = findTargetMedia(msg, ['imageMessage', 'documentMessage']);
-          if (!mediaMatch) {
-            await this.replyText(
-              rt,
-              sock,
-              remoteJid,
-              'Por favor, responde a una imagen (PNG/JPG/WebP) con */sticker* o */s*.',
-              msg
-            );
-            return;
-          }
-          if (mediaMatch.mediaType === 'documentMessage') {
-            const mime = String(mediaMatch.mediaNode?.mimetype || '');
-            if (!mime.startsWith('image/')) {
-              await this.replyText(rt, sock, remoteJid, 'Ese documento no es una imagen compatible.', msg);
+          // 1) URL en el comando o en el mensaje citado
+          const { url: argUrl } = parseUrlAndStartTime(argsText);
+          const sourceUrl = argUrl || extractFirstUrl(extractQuotedText(msg));
+
+          let buffer: Buffer | null = null;
+
+          if (sourceUrl) {
+            await this.replyText(rt, sock, remoteJid, 'Descargando la imagen del link, espera...', msg);
+            const resolved = await resolveMediaFromUrl(sourceUrl, {
+              maxBytes: config.maxImageBytes,
+              signal: controller.signal,
+            });
+            if (resolved.kind !== 'image' && resolved.kind !== 'animated') {
+              await this.replyText(
+                rt,
+                sock,
+                remoteJid,
+                'Ese link contiene un video. Usa */gif* o */stickeranimado* para stickers animados.',
+                msg
+              );
               return;
             }
+            buffer = resolved.buffer;
+          } else {
+            const mediaMatch = findTargetMedia(msg, ['imageMessage', 'documentMessage']);
+            if (!mediaMatch) {
+              await this.replyText(
+                rt,
+                sock,
+                remoteJid,
+                'Responde a una imagen con */sticker* o */s*, o pega un link:\n*/sticker https://ejemplo.com/foto.jpg*',
+                msg
+              );
+              return;
+            }
+            if (mediaMatch.mediaType === 'documentMessage') {
+              const mime = String(mediaMatch.mediaNode?.mimetype || '');
+              if (!mime.startsWith('image/')) {
+                await this.replyText(rt, sock, remoteJid, 'Ese documento no es una imagen compatible.', msg);
+                return;
+              }
+            }
+            const downloaded = await downloadMediaMessage(mediaMatch.targetMsg, 'buffer', {}, {
+              logger: silentPino,
+              reuploadRequest: sock.updateMediaMessage,
+            });
+            buffer = Buffer.isBuffer(downloaded) ? downloaded : Buffer.from(downloaded);
           }
-          const downloaded = await downloadMediaMessage(mediaMatch.targetMsg, 'buffer', {}, {
-            logger: silentPino,
-            reuploadRequest: sock.updateMediaMessage,
-          });
-          const buffer = Buffer.isBuffer(downloaded) ? downloaded : Buffer.from(downloaded);
+
           const check = validateMediaBuffer(buffer, config.maxImageBytes, 'imagen');
           if (!check.valid) {
             await this.replyText(rt, sock, remoteJid, check.error || 'Imagen inválida.', msg);
             return;
           }
-          const { buffer: webpBuffer } = await imageToStickerWebp(buffer, {
+          const { buffer: webpBuffer } = await imageToStickerWebp(buffer as Buffer, {
             packName: config.stickerPack,
             authorName: config.stickerAuthor,
             maxBytes: config.maxStickerBytes,
@@ -770,56 +818,80 @@ export class MultiUserSessionManager {
         }
         case 'gif':
         case 'stickeranimado': {
-          const mediaMatch = findTargetMedia(msg, ['videoMessage', 'documentMessage']);
-          if (!mediaMatch) {
-            await this.replyText(
-              rt,
-              sock,
-              remoteJid,
-              'Responde a un GIF o video corto con */gif* o */stickeranimado* (añade *completo* o *-full* para ver todo el encuadre).',
-              msg
-            );
-            return;
-          }
-          if (mediaMatch.mediaType === 'documentMessage') {
-            const mime = String(mediaMatch.mediaNode?.mimetype || '');
-            if (!mime.startsWith('video/') && mime !== 'image/gif') {
-              await this.replyText(rt, sock, remoteJid, 'Ese documento no es un GIF ni un video.', msg);
+          // Parsear URL + tiempo de inicio de los argumentos o del mensaje citado
+          const { url: argUrl, startTime } = parseUrlAndStartTime(argsText);
+          const startSec = startTime !== null ? startTime : 0;
+          const sourceUrl = argUrl || extractFirstUrl(extractQuotedText(msg));
+
+          let buffer: Buffer | null = null;
+          let ext = 'mp4';
+
+          if (sourceUrl) {
+            await this.replyText(rt, sock, remoteJid, 'Descargando el video del link, espera...', msg);
+            const resolved = await resolveMediaFromUrl(sourceUrl, {
+              maxBytes: config.maxVideoBytes,
+              signal: controller.signal,
+            });
+            if (resolved.kind === 'image') {
+              await this.replyText(
+                rt,
+                sock,
+                remoteJid,
+                'Ese link es una imagen. Usa */sticker* o */s* para stickers de foto.',
+                msg
+              );
               return;
             }
+            buffer = resolved.buffer;
+            ext = resolved.extension;
+          } else {
+            const mediaMatch = findTargetMedia(msg, ['videoMessage', 'documentMessage']);
+            if (!mediaMatch) {
+              await this.replyText(
+                rt,
+                sock,
+                remoteJid,
+                'Responde a un GIF/video con */gif* o */stickeranimado*, o pega un link:\n*/gif https://vm.tiktok.com/... 0:15*',
+                msg
+              );
+              return;
+            }
+            if (mediaMatch.mediaType === 'documentMessage') {
+              const mime = String(mediaMatch.mediaNode?.mimetype || '');
+              if (!mime.startsWith('video/') && mime !== 'image/gif') {
+                await this.replyText(rt, sock, remoteJid, 'Ese documento no es un GIF ni un video.', msg);
+                return;
+              }
+            }
+            const seconds = Number(mediaMatch.mediaNode?.seconds || 0);
+            if (seconds > config.maxVideoSeconds + 8) {
+              await this.replyText(
+                rt,
+                sock,
+                remoteJid,
+                `El video dura ${seconds} segundos. Usa clips de hasta ${config.maxVideoSeconds} segundos.`,
+                msg
+              );
+              return;
+            }
+            const downloaded = await downloadMediaMessage(mediaMatch.targetMsg, 'buffer', {}, {
+              logger: silentPino,
+              reuploadRequest: sock.updateMediaMessage,
+            });
+            buffer = Buffer.isBuffer(downloaded) ? downloaded : Buffer.from(downloaded);
+            const mime = String(mediaMatch.mediaNode?.mimetype || 'video/mp4');
+            ext = mime.includes('gif') ? 'gif' : mime.includes('webm') ? 'webm' : 'mp4';
           }
-          const seconds = Number(mediaMatch.mediaNode?.seconds || 0);
-          if (seconds > config.maxVideoSeconds + 8) {
-            await this.replyText(
-              rt,
-              sock,
-              remoteJid,
-              `El video dura ${seconds} segundos. Usa clips de hasta ${config.maxVideoSeconds} segundos.`,
-              msg
-            );
-            return;
-          }
-          const downloaded = await downloadMediaMessage(mediaMatch.targetMsg, 'buffer', {}, {
-            logger: silentPino,
-            reuploadRequest: sock.updateMediaMessage,
-          });
-          const buffer = Buffer.isBuffer(downloaded) ? downloaded : Buffer.from(downloaded);
+
           const check = validateMediaBuffer(buffer, config.maxVideoBytes, 'video o GIF');
           if (!check.valid) {
             await this.replyText(rt, sock, remoteJid, check.error || 'Video inválido.', msg);
             return;
           }
 
-          const mime = String(mediaMatch.mediaNode?.mimetype || 'video/mp4');
-          const ext = mime.includes('gif') ? 'gif' : mime.includes('webm') ? 'webm' : 'mp4';
           const cropMode = parseVideoCropMode(argsText);
-
-          // Parsear tiempo de inicio de los argumentos del comando
-          const { url, startTime } = parseUrlAndStartTime(argsText);
-          const startSec = startTime !== null ? startTime : 0;
-
           await this.replyText(rt, sock, remoteJid, 'Procesando sticker animado, espera unos segundos...', msg);
-          const { buffer: webpBuffer } = await videoToAnimatedStickerWebp(buffer, {
+          const { buffer: webpBuffer } = await videoToAnimatedStickerWebp(buffer as Buffer, {
             extension: ext,
             maxSeconds: config.maxVideoSeconds,
             maxBytes: config.maxStickerBytes,
@@ -833,22 +905,52 @@ export class MultiUserSessionManager {
           break;
         }
         case 'stickeraudio': {
-          const mediaMatch = findTargetMedia(msg, ['videoMessage']);
-          if (!mediaMatch) {
-            await this.replyText(
-              rt,
-              sock,
-              remoteJid,
-              'Responde a un video con sonido usando */stickeraudio* (añade *completo* o *-full* si quieres conservar la proporción original).',
-              msg
-            );
-            return;
+          // Parsear URL + tiempo de inicio de los argumentos o del mensaje citado
+          const { url: argUrl, startTime } = parseUrlAndStartTime(argsText);
+          const startSec = startTime !== null ? startTime : 0;
+          const sourceUrl = argUrl || extractFirstUrl(extractQuotedText(msg));
+
+          let buffer: Buffer | null = null;
+          let ext = 'mp4';
+
+          if (sourceUrl) {
+            await this.replyText(rt, sock, remoteJid, 'Descargando el video del link, espera...', msg);
+            const resolved = await resolveMediaFromUrl(sourceUrl, {
+              maxBytes: config.maxVideoBytes,
+              signal: controller.signal,
+            });
+            if (resolved.kind === 'image' || resolved.kind === 'animated') {
+              await this.replyText(
+                rt,
+                sock,
+                remoteJid,
+                'Ese link no es un video con audio. Usa */sticker* o */gif* según el caso.',
+                msg
+              );
+              return;
+            }
+            buffer = resolved.buffer;
+            ext = resolved.extension;
+          } else {
+            const mediaMatch = findTargetMedia(msg, ['videoMessage']);
+            if (!mediaMatch) {
+              await this.replyText(
+                rt,
+                sock,
+                remoteJid,
+                'Responde a un video con sonido usando */stickeraudio*, o pega un link:\n*/stickeraudio https://vm.tiktok.com/... 0:08*',
+                msg
+              );
+              return;
+            }
+            const downloaded = await downloadMediaMessage(mediaMatch.targetMsg, 'buffer', {}, {
+              logger: silentPino,
+              reuploadRequest: sock.updateMediaMessage,
+            });
+            buffer = Buffer.isBuffer(downloaded) ? downloaded : Buffer.from(downloaded);
+            ext = 'mp4';
           }
-          const downloaded = await downloadMediaMessage(mediaMatch.targetMsg, 'buffer', {}, {
-            logger: silentPino,
-            reuploadRequest: sock.updateMediaMessage,
-          });
-          const buffer = Buffer.isBuffer(downloaded) ? downloaded : Buffer.from(downloaded);
+
           if (controller.signal.aborted) throw new Error('OPERACION_CANCELADA');
 
           const check = validateMediaBuffer(buffer, config.maxVideoBytes, 'video');
@@ -857,7 +959,7 @@ export class MultiUserSessionManager {
             return;
           }
 
-          const probe = await probeVideoBuffer(buffer, { extension: 'mp4', signal: controller.signal });
+          const probe = await probeVideoBuffer(buffer as Buffer, { extension: ext, signal: controller.signal });
           if (!probe.hasAudio) {
             await this.replyText(
               rt,
@@ -869,15 +971,11 @@ export class MultiUserSessionManager {
             return;
           }
 
-          // Parsear tiempo de inicio de los argumentos del comando
-          const { startTime } = parseUrlAndStartTime(argsText);
-          const startSec = startTime !== null ? startTime : 0;
-
           const cropMode = parseVideoCropMode(argsText);
           await this.replyText(rt, sock, remoteJid, 'Creando Sound Sticker sincronizado, espera unos segundos...', msg);
 
-          const stickerResult = await videoToAnimatedStickerWebp(buffer, {
-            extension: 'mp4',
+          const stickerResult = await videoToAnimatedStickerWebp(buffer as Buffer, {
+            extension: ext,
             maxSeconds: config.maxVideoSeconds,
             maxBytes: config.maxStickerBytes,
             packName: config.stickerPack,
@@ -894,13 +992,14 @@ export class MultiUserSessionManager {
               ? stickerResult.duration
               : Math.min(probe.duration || config.maxVideoSeconds, config.maxVideoSeconds);
 
-          // Aplicar el mismo inicio al audio con leadMs para sincronización
+          // Aplicar EXACTAMENTE el mismo inicio al audio (con leadMs) para sincronizar
           const audioResult = await extractSynchronizedAudio({
-            inputBuffer: buffer,
-            extension: 'mp4',
+            inputBuffer: buffer as Buffer,
+            extension: ext,
             targetDuration: exactDuration,
             kbps: config.audioKbps,
             leadMs: config.audioLeadMs,
+            startOffsetMs: startSec * 1000,
             signal: controller.signal,
           });
 
