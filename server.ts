@@ -268,10 +268,8 @@ async function bootstrap(): Promise<void> {
         return;
       }
 
-      // Usar BENCH_DOWNLOADER_URL si está configurado
+      // Usar BENCH_DOWNLOADER_URL si está configurado (fetch global de Node 22)
       if (config.benchDownloaderUrl) {
-        // Llamar al servicio externo
-        const fetch = (await import('node-fetch')).default;
         const externalRes = await fetch(`${config.benchDownloaderUrl}/download`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -297,7 +295,7 @@ async function bootstrap(): Promise<void> {
       const filePath = path.join(os.tmpdir(), `stickerbot-download-${jobId}`);
       await fs.writeFile(filePath, buffer);
 
-      res.json({ ok: true, filePath: `/file/${jobId}` });
+      res.json({ ok: true, filePath: `/api/file/${jobId}` });
     } catch (err: any) {
       const message = err instanceof Error ? err.message : 'Error desconocido';
       res.status(400).json({ error: message });

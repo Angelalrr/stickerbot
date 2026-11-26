@@ -3,6 +3,8 @@
  * Compatibles con ejecucion nativa Node 22 strip-types y tsx --test.
  */
 
+import net from 'node:net';
+
 export type VideoCropMode = 'crop' | 'full';
 
 export interface ParsedCommand {
@@ -249,7 +251,7 @@ export function parseStartTime(raw: string): number | null {
  * Retorna la URL limpia o lanza error.
  */
 export function validateUrlAntiSsrf(rawUrl: string): string {
-  let url = (rawUrl || '').trim();
+  const url = (rawUrl || '').trim();
   if (!url) throw new Error('Pega una URL válida.');
 
   // Debe empezar con http:// o https://
@@ -262,36 +264,45 @@ export function validateUrlAntiSsrf(rawUrl: string): string {
     throw new Error('No se permiten credenciales (user:pass@) dentro de la URL.');
   }
 
-  // Parsear y validar hostname
+  let parsed: URL;
   try {
-    const p = new URL(url);
-    const host = p.hostname.toLowerCase();
-
-    // No permitir localhost/.local
-    if (host === 'localhost' || host === 'localhost.localdomain') {
-      throw new Error('No se permiten direcciones localhost.');
-    }
-    if (host.endsWith('.localhost') || host.endsWith('.local')) {
-      throw new Error('No se permiten direcciones .localhost o .local.');
-    }
-
-    // No permitir IPs privadas o locales
-    try {
-      const ip = p.hostname; // Keep original for ipaddress check
-      const parsedIp = new ipaddress.ip_address(ip);
-      if (!parsedIp.isGlobal) {
-        throw new Error('No se permiten direcciones IP privadas o locales.');
-      }
-    } catch (e) {
-      // No es una IP, es un hostname - está bien
-      if (e instanceof Error && !e.message.includes('isGlobal')) throw e;
-    }
-  } catch (e: any) {
-    if (e.message && !e.message.includes('No se permiten')) throw e;
+    parsed = new URL(url);
+  } catch {
     throw new Error('URL inválida.');
   }
 
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (isPrivateOrLocalHost(host)) {
+    throw new Error('No se permiten direcciones locales o IPs privadas.');
+  }
   return url;
+}
+
+/** Detecta localhost, dominios .local y direcciones IP privadas/reservadas. */
+export function isPrivateOrLocalHost(host: string): boolean {
+  const clean = (host || '').toLowerCase().trim();
+  if (!clean) return true;
+  if (clean === 'localhost' || clean === 'localhost.localdomain') return true;
+  if (clean.endsWith('.localhost') || clean.endsWith('.local')) return true;
+
+  const version = net.isIP(clean);
+  if (version === 4) {
+    const parts = clean.split('.').map(Number);
+    const [a, b] = parts;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true; // link-local
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+    return false;
+  }
+  if (version === 6) {
+    if (clean === '::1' || clean === '::') return true;
+    if (clean.startsWith('fc') || clean.startsWith('fd')) return true; // ULA
+    if (clean.startsWith('fe80')) return true; // link-local
+    return false;
+  }
+  return false; // es un hostname público
 }
 
 /**

@@ -858,26 +858,21 @@ async function downloadUrl(rawUrl: string, maxBytes: number): Promise<Buffer> {
     };
 
     const req = protocol.request(options, (res) => {
-      let data = '';
+      const chunks: Buffer[] = [];
       let size = 0;
 
-      res.on('data', (chunk: string) => {
+      res.on('data', (chunk: Buffer) => {
         size += chunk.length;
         if (size > maxBytes) {
           req.destroy();
           reject(new Error(`Archivo demasiado grande (>${Math.round(maxBytes / (1024 * 1024))} MB).`));
           return;
         }
-        data += chunk;
+        chunks.push(chunk);
       });
 
       res.on('end', () => {
-        try {
-          const buffer = Buffer.from(data, 'utf8');
-          resolve(buffer);
-        } catch (e) {
-          reject(e);
-        }
+        resolve(Buffer.concat(chunks));
       });
     });
 
@@ -891,7 +886,7 @@ async function downloadUrl(rawUrl: string, maxBytes: number): Promise<Buffer> {
     });
 
     req.end();
-  );
+  });
 }
 
 export { downloadUrl };
